@@ -6,7 +6,7 @@ WARNING: This functionality is in beta and is subject to change. Deployment in p
 By default, Logstash uses in-memory bounded queues between pipeline stages
 (inputs → pipeline workers) to buffer events. The size of these in-memory
 queues is fixed and not configurable. If Logstash terminates abnormally,
-either as the result of a software crash of  `kill -9`, it's
+either as the result of a software crash or `kill -9`, it's
 possible to lose queued events. 
 
 To prevent event loss in these scenarios, you can configure Logstash to use
