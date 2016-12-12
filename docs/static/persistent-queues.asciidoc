@@ -1,24 +1,23 @@
 [[persistent-queues]]
 === Persistent Queues
 
-WARNING: This functionality is in beta and is subject to change. It should be deployed in production at your own risk.
+WARNING: This functionality is in beta and is subject to change. Deployment in production is at your own risk.
 
 By default, Logstash uses in-memory bounded queues between pipeline stages
-(input → filter and filter → output) to buffer events. The size of these 
-in-memory queues is fixed and not configurable. If Logstash terminates unsafely,
-either as the result of a software failure or the user forcing an unsafe
-shutdown, it's possible to lose queued events. 
+(inputs → pipeline workers) to buffer events. The size of these in-memory
+queues is fixed and not configurable. If Logstash terminates abnormally,
+either as the result of a software crash of  `kill -9`, it's
+possible to lose queued events. 
 
 To prevent event loss in these scenarios, you can configure Logstash to use
-persistent queues. With persistent queues enabled, Logstash persists buffered
-events to disk instead of storing them in memory. 
+persistent queues. With persistent queues enabled, Logstash stores 
+the queue on disk.
 
 Persistent queues are also useful for Logstash deployments that require high
 throughput and resiliency. Instead of deploying and managing a message
 broker, such as Redis, RabbitMQ, or Apache Kafka, to handle a mismatch in
 cadence between the shipping stage and the relatively expensive processing
-stage, you can enable persistent queues to buffer events on disk. The queue size
-is variable and configurable, which means that you have more control over
+stage, you can enable persistent queues to buffer events on disk. The persistent queue has configurable sizing, which means that you have more control over
 managing situations that can result in back pressure to the source. See <<backpressure-persistent-queues>>. 
 
 [[persistent-queues-advantages]]
@@ -26,22 +25,21 @@ managing situations that can result in back pressure to the source. See <<backpr
 
 Using persistent queues:
 
-* Provides protection from losing in-flight messages when the Logstash process is shut down or the machine is restarted.
-* Handles the surge of events without having to use an external queueing mechanism like Redis or Kafka.
-* Provides an at-least-once message delivery guarantee. If Logstash is restarted
-while events are in-flight, Logstash will attempt to deliver messages stored
-in the persistent queue until delivery succeeds at least once. In other words,
-messages stored in the persistent queue may be duplicated, but not lost.
+* Provides protection from losing in-flight messages when the Logstash process is abnormally terminated.
+* Absorb bursts of events without needing an external queueing mechanism like Redis or Kafka.
+* Depending on configuration, can provide an at-least-once message
+delivery guarantee. If Logstash is restarted while events are in-flight,
+Logstash will attempt to deliver messages stored in the persistent queue until
+delivery succeeds at least once. In other words, messages stored in the
+persistent queue may be duplicated, but not lost.
 
 [[persistent-queues-limitations]]
 ==== Limitations of Persistent Queues
 
-The current implementation of persistent queues has the following limitations:
+Persistent queues solves many problems, but the following are problems not
+solved:
 
-* This version does not enable full end-to-end resiliency, except for messages
-sent to the <<plugins-inputs-beats,beats>> input. For other inputs, Logstash
-only acknowledges delivery of messages in the filter and output stages, and not
-all the way back to the input or source.
+* Inputs which do not use a request-response protocol cannot be protected from data loss. For example: tcp, udp, zeromq push+pull, and many other inputs do not have a mechanism to acknowledge receipt to the sender. Plugins such as beats and http, which *do* have a acknowledgement capability, are well protected by this queue.
 * It does not handle permanent disk or machine failures. The data persisted to disk is not replicated, so it is still a single point of failure.
 
 [[persistent-queues-architecture]]
@@ -53,25 +51,26 @@ process:
 input → persistent queue → filter + output 
 
 The input stage reads data from the configured data source and writes events to
-the persistent queue for processing. As events pass through the pipeline,
-Logstash pulls a batch of events from the persistent queue for processing them
-in the filter and output stages. As events are processed, Logstash uses a
-checkpoint file to track which events are successfully acknowledged (ACKed) as
-processed by Logstash. An event is recorded as ACKed in the checkpoint file if
-the event is successfully sent to the last output stage in the pipeline;
-Logstash does not wait for the output to acknowledge delivery. 
+the persistent queue for processing. Logstash reads a batch of events from the
+persistent queue and sends them to the filter and output stages. As events
+are processed, Logstash records a checkpoint to track which events are
+successfully acknowledged (ACKed) as processed by Logstash. An event is
+recorded as ACKed in the checkpoint if the event is successfully sent to the
+last output stage in the pipeline;
 
-During a normal, controlled shutdown (*CTRL+C*), Logstash finishes
+During a normal, controlled shutdown (*CTRL+C* or SIGTERM), Logstash finishes
 processing the current in-flight events (that is, the events being processed by
 the filter and output stages, not the queued events), finalizes the ACKing
 of these events, and then terminates the Logstash process. Upon restart,
-Logstash uses the checkpoint file to pick up where it left off in the persistent
-queue and processes the events in the backlog. 
+Logstash uses last checkpoint to resume processing the events in the backlog. 
 
 If Logstash crashes or experiences an uncontrolled shutdown, any in-flight
-events are left as unACKed in the persistent queue. Upon restart, Logstash will
-replay the events from its history, potentially leading to duplicate data being
-written to the output.
+events are left as unACKed in the persistent queue; during these abnormal
+terminations, Logstash is unable to safely save a new checkpoint, so the most
+recent checkpoint will be used on startup. Logstash will again resume from the
+last checkpoint the events from its history. This scenario can lead to some
+recent events being processed twice (once before the crash, and once upon
+restart and resuming).
 
 [[configuring-persistent-queues]]
 ==== Configuring Persistent Queues
@@ -79,18 +78,19 @@ written to the output.
 To configure persistent queues, you can specify the following options in the
 Logstash <<logstash-settings-file,settings file>>:
 
-* `queue.type`: Specify `persisted` to enable persistent queues. By default, persistent queues are disabled (`queue.type: memory`).
+* `queue.type`: Specify `persisted` to enable persistent queues. By default, persistent queues are disabled (default: `queue.type: memory`).
 * `path.queue`: The directory path where the data files will be stored. By default, the files are stored in `path.data/queue`. 
 * `queue.page_capacity`: The size of the page data file. The queue data consists of append-only data files separated into pages. The default size is 250mb. 
-* `queue.max_events`:  The maximum number of unread events that are allowed in the queue. The default is 0 (unlimited).
+* `queue.max_events`:  The maximum number of unACKed events that are allowed in the queue. The default is 0 (unlimited).
 * `queue.max_bytes`: The total capacity of the queue in number of bytes. The
 default is 1024mb (1gb). Make sure the capacity of your disk drive is greater
-than the value you specify here. If both `queue.max_events` and 
-`queue.max_bytes` are specified, Logstash uses whichever criteria is reached
-first. 
+than the value you specify here.
 
-You can also specify options that control when the checkpoint file gets updated (`queue.checkpoint.acks`, `queue.checkpoint.writes`, and
-`queue.checkpoint.interval`). See <<durability-persistent-queues>>.
+If both `queue.max_events` and 
+`queue.max_bytes` are specified, Logstash uses whichever criteria is reached
+first. See <<backpressure-persistent-queue>> for behavior when these queue limits are reached.
+
+You can also specify options that control when the checkpoint file gets updated (`queue.checkpoint.acks`, `queue.checkpoint.writes`). See <<durability-persistent-queues>>.
 
 Example configuration:
 
