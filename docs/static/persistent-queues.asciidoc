@@ -55,14 +55,14 @@ the persistent queue for processing. Logstash reads a batch of events from the
 persistent queue and sends them to the filter and output stages. As events
 are processed, Logstash records a checkpoint to track which events are
 successfully acknowledged (ACKed) as processed by Logstash. An event is
-recorded as ACKed in the checkpoint if the event is successfully sent to the
-last output stage in the pipeline;
+recorded as ACKed if the event is successfully sent to the
+last output stage in the pipeline.
 
 During a normal, controlled shutdown (*CTRL+C* or SIGTERM), Logstash finishes
 processing the current in-flight events (that is, the events being processed by
 the filter and output stages, not the queued events), finalizes the ACKing
 of these events, and then terminates the Logstash process. Upon restart,
-Logstash uses last checkpoint to resume processing the events in the backlog. 
+Logstash uses the last checkpoint to resume processing the events in the backlog. 
 
 If Logstash crashes or experiences an uncontrolled shutdown, any in-flight
 events are left as unACKed in the persistent queue; during these abnormal
